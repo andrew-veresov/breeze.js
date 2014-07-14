@@ -265,7 +265,8 @@ var EntityAspect = (function() {
             // The 'order' entity will now be in an 'Unchanged' state with any changes committed.
     @method setUnchanged
     **/
-    proto.setUnchanged = function() {
+    proto.setUnchanged = function () {
+        checkStateChange(this);
         clearOriginalValues(this.entity);
         delete this.hasTempKey;
         this.entityState = EntityState.Unchanged;
@@ -288,6 +289,9 @@ var EntityAspect = (function() {
     }
 
     // Dangerous method - see notes - talk to Jay - this is not a complete impl
+    // Another alternative is to detach the reattach if already attached - but this would have
+    // the side effect of firing validation which would be 'correct' but possibly not 
+    // anticipated.
     //        proto.setAdded = function () {
     //            this.originalValues = {};
     //            this.entityState = EntityState.Added;
@@ -304,7 +308,8 @@ var EntityAspect = (function() {
         // The 'order' entity will now be in a 'Modified' state. 
     @method setModified
     **/
-    proto.setModified = function() {
+    proto.setModified = function () {
+        checkStateChange(this);
         this.entityState = EntityState.Modified;
         this.entityManager._notifyStateChange(this.entity, true);
     };
@@ -318,7 +323,8 @@ var EntityAspect = (function() {
         // The 'order' entity will now be in a 'Deleted' state and it will no longer have any 'related' entities. 
     @method setDeleted
     **/
-    proto.setDeleted = function() {
+    proto.setDeleted = function () {
+        checkStateChange(this);
         var em = this.entityManager;
         var entity = this.entity;
         if (this.entityState.isAdded()) {
@@ -332,6 +338,11 @@ var EntityAspect = (function() {
         // TODO: think about cascade deletes
     };
 
+    function checkStateChange(aspect) {
+        if (aspect.entityState.isDetached()) {
+            throw new Error("You cannot set the 'entityState' of an entity when it is detached - except by first attaching it to an EntityManager");
+        }
+    }
 
     /**
     Sets the entity to an EntityState of 'Detached'.  This removes the entity from all of its related entities, but does NOT change the EntityState of any existing entities. 
@@ -342,6 +353,7 @@ var EntityAspect = (function() {
     @method setDetached
     **/
     proto.setDetached = function () {
+        if (this.entityState.isDetached()) return true;
         var group = this.entityGroup;
         if (!group) {
             // no group === already detached.
@@ -349,9 +361,11 @@ var EntityAspect = (function() {
         }
         var entity = this.entity;
         group.detachEntity(entity);
+        this.entityState = EntityState.Detached;
         removeFromRelations(entity, EntityState.Detached);
-        this.entityManager.entityChanged.publish({ entityAction: EntityAction.Detach, entity: entity });
+        var em = this.entityManager;
         this._detach();
+        em.entityChanged.publish({ entityAction: EntityAction.Detach, entity: entity });
         return true;
     }
 
@@ -379,27 +393,64 @@ var EntityAspect = (function() {
         var entity = this.entity;
         var navProperty = entity.entityType._checkNavProperty(navigationProperty);
         var query = EntityQuery.fromEntityNavigation(entity, navProperty);
-        return entity.entityAspect.entityManager.executeQuery(query, callback, errorCallback);
+        // return entity.entityAspect.entityManager.executeQuery(query, callback, errorCallback);
+        var promise = entity.entityAspect.entityManager.executeQuery(query);
+        var that = this;
+        return promise.then(function(data) {
+            that._markAsLoaded(navProperty.name);
+            if (callback) callback(data);
+            return Q.resolve(data);
+        }, function(error) {
+            if (errorCallback) errorCallback(error);
+            return Q.reject(error);
+        });
+
     };
 
-    ///**
-    //Marks this navigationProperty on this entity as already having been loaded.
-    //@example
-    //        emp.entityAspect.markAsLoaded("Orders");
+    /**
+    Marks this navigationProperty on this entity as already having been loaded.
+    @example
+            emp.entityAspect.markNavigationPropertyAsLoaded("Orders");
             
-    //@method markAsLoaded
-    //@async
-    //@param navigationProperty {NavigationProperty|String} The NavigationProperty or name of NavigationProperty to 'load'.   
-    //**/
-    //proto.markNavigationPropertyAsLoaded = function(navigationProperty) {
-    //    var navProperty = this.entity.entityType._checkNavProperty(navigationProperty);
-    //    this._loadedNavPropMap[navProperty.name] = true;
-    //}
+    @method markAsLoaded
+    @async
+    @param navigationProperty {NavigationProperty|String} The NavigationProperty or name of NavigationProperty to 'load'.   
+    **/
+    proto.markNavigationPropertyAsLoaded = function(navigationProperty) {
+        var navProperty = this.entity.entityType._checkNavProperty(navigationProperty);
+        this._markAsLoaded(navProperty.name);
+    }
 
-    //proto.isNavigationPropertyLoaded = function (navigationProperty) {
-    //    var navProperty = this.entity.entityType._checkNavProperty(navigationProperty);
-    //    return !!_loadedNavPropMap[navProperty.name];
-    //}
+    /**
+    Determines whether a navigationProperty on this entity has already been loaded. 
+    
+    @example
+    A navigation property is considered loaded when any of the following three conditions applies:  
+
+        1) It was fetched from the backend server.  
+            a) This can be the result of an expand query or a call to the EntityAspect.loadNavigationProperty method. 
+            b) Note that even if the fetch returns nothing the property is still marked as loaded in this case. 
+        2) The property is scalar and has been set to a nonnull value. 
+        3) The EntityAspect.markNavigationPropertyAsLoaded was called.
+    
+    @example
+        var wasLoaded = emp.entityAspect.isNavigationPropertyLoaded("Orders");
+            
+    @method isNavigationPropertyLoaded
+    @param navigationProperty {NavigationProperty|String} The NavigationProperty or name of NavigationProperty to 'load'.   
+    **/
+    proto.isNavigationPropertyLoaded = function (navigationProperty) {
+        var navProperty = this.entity.entityType._checkNavProperty(navigationProperty);
+        if (navProperty.isScalar && this.entity.getProperty(navProperty.name) != null) {
+            return true;
+        }
+        return this._loadedNps && this._loadedNps.indexOf(navProperty.name) >= 0;
+    }
+
+    proto._markAsLoaded = function(navPropName) {
+        this._loadedNps = this._loadedNps || [];
+        __arrayAddItemUnique(this._loadedNps, navPropName);
+    }
 
 
     /**
@@ -424,32 +475,40 @@ var EntityAspect = (function() {
         return ok;
     };
 
-    function validateTarget(target) {
+    // coIndex is only used where target is a complex object that is part of an array of complex objects 
+    // in which case ctIndex is the index of the target within the array.
+    function validateTarget(target, coIndex) {
         var ok = true;
         var stype = target.entityType || target.complexType;
         var aspect = target.entityAspect || target.complexAspect;
         var entityAspect = target.entityAspect || target.complexAspect.getEntityAspect();
-            
+        var context = { entity: entityAspect.entity  };
+        if (coIndex !== undefined) {
+            context.index = coIndex;
+        }    
+        
         stype.getProperties().forEach(function (p) {
             var value = target.getProperty(p.name);
-            var propName = aspect.getPropertyPath(p.name);
             if (p.validators.length > 0) {
-                var context = { entity: entityAspect.entity, property: p, propertyName: propName };
+                context.property = p;
+                context.propertyName = aspect.getPropertyPath(p.name);
                 ok = entityAspect._validateProperty(value, context) && ok;
             }
             if (p.isComplexProperty) {
                 if (p.isScalar) {
                     ok = validateTarget(value) && ok;
                 } else {
-                    // TODO: do we want to iterate over all of the complexObject in this property?
+                    ok = value.reduce(function(pv, cv, ix) {
+                        return validateTarget(cv, ix) && pv;
+                    }, ok);
                 }
             }
         });
             
 
-        // then entity level
+        // then target level
         stype.validators.forEach(function (validator) {
-            ok = validate(entityAspect, validator, aspect.entity) && ok;
+            ok = validate(entityAspect, validator, target) && ok;
         });
         return ok;
     }
@@ -563,7 +622,7 @@ var EntityAspect = (function() {
                     that._pendingValidationResult.removed.push(valError);
                 }
             });
-            that.hasValidationErrors = !__isEmpty(this._validationErrors);
+            that.hasValidationErrors = !__isEmpty(that._validationErrors);
         });
     };
 
@@ -684,15 +743,15 @@ var EntityAspect = (function() {
 
         var isDeleted = entityState.isDeleted();
         if (isDeleted) {
-            removeFromRelationsCore(entity, true);
+            removeFromRelationsCore(entity);
         } else {
             __using(entity.entityAspect.entityManager, "isLoading", true, function () {
-                removeFromRelationsCore(entity, false)
+                removeFromRelationsCore(entity);
             });
         }
     }
 
-    function removeFromRelationsCore(entity, isDeleted) {
+    function removeFromRelationsCore(entity) {
         entity.entityType.navigationProperties.forEach(function (np) {
             var inverseNp = np.inverse;
             var npValue = entity.getProperty(np.name);
@@ -700,7 +759,7 @@ var EntityAspect = (function() {
                 if (npValue) {
                     if (inverseNp) {
                         if (inverseNp.isScalar) {
-                            clearNp(npValue, inverseNp, isDeleted);
+                            npValue.setProperty(inverseNp.name, null);
                         } else {
                             var collection = npValue.getProperty(inverseNp.name);
                             if (collection.length) {
@@ -715,7 +774,7 @@ var EntityAspect = (function() {
                     // npValue is a live list so we need to copy it first.
                     npValue.slice(0).forEach(function (v) {
                         if (inverseNp.isScalar) {
-                            clearNp(v, inverseNp, isDeleted);
+                            v.setProperty(inverseNp.name, null);
                         } else {
                             // TODO: many to many - not yet handled.
                         }
@@ -728,38 +787,15 @@ var EntityAspect = (function() {
 
     };
 
-    function clearNp(entity, np, relatedIsDeleted) {
-        if (relatedIsDeleted) {
-            entity.setProperty(np.name, null);
-        } else {
-            // relatedEntity was detached.
-            // need to clear child np without clearing child fk or changing the entityState of the child
-            var em = entity.entityAspect.entityManager;
-
-            var fkNames = np.foreignKeyNames;
-            if (fkNames) {
-                var fkVals = fkNames.map(function (fkName) {
-                    return entity.getProperty(fkName);
-                });
-            }
-            entity.setProperty(np.name, null);
-            if (fkNames) {
-                fkNames.forEach(function (fkName, i) {
-                    entity.setProperty(fkName, fkVals[i])
-                });
-            }
-
-        }
-    }
-
-    function validate(aspect, validator, value, context) {
+    // note entityAspect only - ( no complex aspect allowed on the call).
+    function validate(entityAspect, validator, value, context) {
         var ve = validator.validate(value, context);
         if (ve) {
-            aspect._addValidationError(ve);
+            entityAspect._addValidationError(ve);
             return false;
         } else {
             var key = ValidationError.getKey(validator, context ? context.propertyName: null);
-            aspect._removeValidationError(key);
+            entityAspect._removeValidationError(key);
             return true;
         }
     }
@@ -847,20 +883,6 @@ var ComplexAspect = (function() {
     **/
         
     /**
-    The EntityAspect for the top level entity tht contains this complex object.
-
-    __readOnly__
-    @property entityAspect {String}
-    **/
-        
-    /**
-    The 'property path' from the top level entity that contains this complex object to this object.
-
-    __readOnly__
-    @property propertyPath {String}
-    **/
-        
-    /**
     The 'original values' of this complex object where they are different from the 'current values'. 
     This is a map where the key is a property name and the value is the 'original value' of the property.
 
@@ -868,6 +890,12 @@ var ComplexAspect = (function() {
     @property originalValues {Object}
     **/
 
+    /**
+    Returns the EntityAspect for the top level entity tht contains this complex object.
+
+    @method getEntityAspect
+    @return  {String}  
+    **/
     proto.getEntityAspect = function() {
         var parent = this.parent;
         if (!parent) return new EntityAspect(null);
@@ -879,6 +907,13 @@ var ComplexAspect = (function() {
         return entityAspect || new EntityAspect(null);
     }
 
+    /**
+    Executes the specified query against this EntityManager's local cache.
+
+    @method getPropertyPath
+    @param propName {String}  The property name of a property on this complex aspect for which we want the full path.
+    @return  {String}    The 'property path' from the top level entity that contains this complex object to this object.
+    **/
     proto.getPropertyPath = function(propName) {
         var parent = this.parent;
         if (!parent) return null;

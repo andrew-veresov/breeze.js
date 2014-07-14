@@ -25,7 +25,7 @@ var EntityQuery = (function () {
     var ctor = function (resourceName) {
         assertParam(resourceName, "resourceName").isOptional().isString().check();
         this.resourceName = resourceName;
-        this.entityType = null;
+        this.fromEntityType = null;
         this.wherePredicate = null;
         this.orderByClause = null;
         this.selectClause = null;
@@ -50,6 +50,15 @@ var EntityQuery = (function () {
 
     __readOnly__
     @property resourceName {String}
+    **/
+
+    /**
+    The entityType that is associated with the 'from' clause ( resourceName) of the query.  This is only guaranteed to be be set AFTER the query 
+    has been executed because it depends on the MetadataStore associated with the EntityManager that the query was executed against.
+    This value may be null if the entityType cannot be associated with a resourceName.
+
+    __readOnly__
+    @property fromEntityType {EntityType}
     **/
 
     /**
@@ -162,7 +171,7 @@ var EntityQuery = (function () {
     **/
     proto.toType = function(entityType) {
         assertParam(entityType, "entityType").isString().or().isInstanceOf(EntityType).check();
-        return clone(this, "resultEntityType", entityType)
+        return clone(this, "resultEntityType", entityType);
     };
 
         
@@ -218,21 +227,15 @@ var EntityQuery = (function () {
     @return {EntityQuery}
     @chainable
     **/
-    proto.where = function (predicate) {
-        var wherePredicate;
-        if (predicate == null) {
-            wherePredicate = null;
-        } else {
-            var pred;
-            if (predicate instanceof Predicate) {
-                wherePredicate = predicate;
-            } else {
+    proto.where = function (wherePredicate) {
+        if (wherePredicate != null) {
+            if (!(wherePredicate instanceof Predicate)) {
                 wherePredicate = Predicate.create(__arraySlice(arguments));
             }
-            if (this.entityType) wherePredicate.validate(this.entityType);
+            if (this.fromEntityType) wherePredicate.validate(this.fromEntityType);
             if (this.wherePredicate) {
                 wherePredicate = new CompositePredicate('and', [this.wherePredicate, wherePredicate]);
-            } 
+            }
         }
         return clone(this, "wherePredicate", wherePredicate);
 
@@ -765,7 +768,7 @@ var EntityQuery = (function () {
         // Uncomment next two lines if we make this method public.
         // assertParam(metadataStore, "metadataStore").isInstanceOf(MetadataStore).check();
         // assertParam(throwErrorIfNotFound, "throwErrorIfNotFound").isBoolean().isOptional().check();
-        var entityType = this.entityType;
+        var entityType = this.fromEntityType;
         if (entityType) return entityType;
 		
 		if (this.asTypeName != undefined) {
@@ -804,7 +807,7 @@ var EntityQuery = (function () {
             }
         }
                 
-        this.entityType = entityType;
+        this.fromEntityType = entityType;
         return entityType;
         
     };
@@ -831,9 +834,9 @@ var EntityQuery = (function () {
             if (that[propName] === value) return that;
         }
         // copying QueryOptions is safe because they are are immutable; 
-        copy = __extend(new EntityQuery(), that, [
+        var copy = __extend(new EntityQuery(), that, [
             "resourceName",
-            "entityType",
+            "fromEntityType",
             "wherePredicate",
             "orderByClause",
             "selectClause",
@@ -877,13 +880,8 @@ var EntityQuery = (function () {
         // private methods to this func.
 
         function toFilterString() {
-            var clause = eq.wherePredicate;
-            if (!clause) return;
-            if (eq.entityType) {
-                clause.validate(eq.entityType);
-            }
             Predicate._next = 0;
-            return clause.toODataFragment(entityType);
+            return validateToOData(eq.wherePredicate);
         }
             
         function toInlineCountString() {
@@ -892,21 +890,11 @@ var EntityQuery = (function () {
         }
 
         function toOrderByString() {
-            var clause = eq.orderByClause;
-            if (!clause) return;
-            if (eq.entityType) {
-                clause.validate(eq.entityType);
-            }
-            return clause.toODataFragment(entityType);
+            return validateToOData(eq.orderByClause);
         }
             
-            function toSelectString() {
-            var clause = eq.selectClause;
-            if (!clause) return;
-            if (eq.entityType) {
-                clause.validate(eq.entityType);
-            }
-            return clause.toODataFragment(entityType);
+        function toSelectString() {
+            return validateToOData(eq.selectClause);
         }
             
         function toExpandString() {
@@ -947,6 +935,14 @@ var EntityQuery = (function () {
             } else {
                 return "";
             }
+        }
+
+        function validateToOData(clause) {
+            if (!clause) return;
+            if (!entityType.isAnonymous) {
+                clause.validate(entityType);
+            }
+            return clause.toODataFragment(entityType);
         }
     };
 
@@ -1204,7 +1200,6 @@ var FnNode = (function() {
     proto._validate = function(entityType) {
         // will throw if not found;
         if (this.isValidated) return;            
-        this.isValidated = true;
         if (this.propertyPath) {
             if (entityType.isAnonymous) return;
             var prop = entityType.getProperty(this.propertyPath, true);
@@ -1222,6 +1217,7 @@ var FnNode = (function() {
                 node._validate(entityType);
             });
         }
+        this.isValidated = true;
     };
         
     function createPropFunction(propertyPath) {
@@ -1330,7 +1326,7 @@ var FilterQueryOp = (function () {
 
     aEnum.IsTypeOf = aEnum.addSymbol({ operator: "isof", isFunction: true, aliases: ["isTypeOf"] });
     
-    aEnum.seal();
+    aEnum.resolveSymbols();
     aEnum._map = function () {
         var map = {};
         aEnum.getSymbols().forEach(function (s) {
@@ -1360,7 +1356,7 @@ var BooleanQueryOp = (function () {
     aEnum.Or = aEnum.addSymbol({ operator: "or", aliases: ["||"] });
     aEnum.Not = aEnum.addSymbol({ operator: "not", aliases: ["~", "!"] });
 
-    aEnum.seal();
+    aEnum.resolveSymbols();
     aEnum._map = (function () {
         var map = {};
         aEnum.getSymbols().forEach(function (s) {
@@ -1744,7 +1740,7 @@ var SimplePredicate = (function () {
 
     proto.toFunction = function (entityType) {
         if (this._odataExpr) {
-            throw new Exception("OData predicateexpressions cannot be interpreted locally");
+            throw new Error("OData predicateexpressions cannot be interpreted locally");
         }
         this.validate(entityType);
 
@@ -2222,9 +2218,7 @@ var SelectClause = (function () {
     var proto = ctor.prototype;
 
     proto.validate = function (entityType) {
-        if (!entityType) {
-            return;
-        } // can't validate yet
+        if (!entityType) return; // can't validate yet
         // will throw an exception on bad propertyPath
         this.propertyPaths.forEach(function(path) {
             entityType.getProperty(path, true);
@@ -2261,11 +2255,6 @@ var ExpandClause = (function () {
     };
         
     var proto = ctor.prototype;
-       
-//        // TODO:
-//        proto.validate = function (entityType) {
-//            
-//        };
 
     proto.toODataFragment = function(entityType) {
         var frag = this.propertyPaths.map(function(pp) {
@@ -2278,23 +2267,16 @@ var ExpandClause = (function () {
 })();
     
 function getPropertyPathValue(obj, propertyPath) {
-    var properties;
-    if (Array.isArray(propertyPath)) {
-        properties = propertyPath;
-    } else {
-        properties = propertyPath.split(".");
-    }
+    var properties = Array.isArray(propertyPath) ? propertyPath : propertyPath.split(".");
     if (properties.length === 1) {
         return obj.getProperty(propertyPath);
     } else {
         var nextValue = obj;
-        for (var i = 0; i < properties.length; i++) {
-            nextValue = nextValue.getProperty(properties[i]);
-            // == in next line is deliberate - checks for undefined or null.
-            if (nextValue == null) {
-                break;
-            }
-        }
+        // hack use of some to perform mapFirst operation.
+        properties.some(function(prop) {
+            nextValue = nextValue.getProperty(prop);
+            return nextValue == null;
+        });
         return nextValue;
     }
 }

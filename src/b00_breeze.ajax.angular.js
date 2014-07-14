@@ -1,4 +1,5 @@
-﻿// needs Angular
+﻿// Angular ajax adapter
+// See https://docs.angularjs.org/api/ng/service/$http
 (function(factory) {
     // Module systems magic dance.
     if (breeze) {
@@ -11,6 +12,7 @@
         define(["breeze"], factory);
     }
 }(function(breeze) {
+    "use strict";
     var core = breeze.core;
     
     var httpService;
@@ -19,9 +21,11 @@
     var ctor = function () {
         this.name = "angular";
         this.defaultSettings = { };
+        this.requestInterceptor = null;
     };
+    var proto = ctor.prototype;
 
-    ctor.prototype.initialize = function () {
+    proto.initialize = function () {
 
         var ng = core.requireLib("angular");
         if (ng) {
@@ -34,12 +38,12 @@
                 
     };
 
-    ctor.prototype.setHttp = function (http) {
+    proto.setHttp = function (http) {
         httpService = http;
         rootScope = null; // to suppress rootScope.digest
     };
 
-    ctor.prototype.ajax = function (config) {
+    proto.ajax = function (config) {
         if (!httpService) {
             throw new Error("Unable to locate angular for ajax adapter");
         }
@@ -71,31 +75,61 @@
             ngConfig.headers = core.extend(this.defaultSettings.headers, ngConfig.headers);
         }
 
-        httpService(ngConfig).success(function (data, status, headers, xconfig) {
+        var requestInfo = {
+            adapter: this,      // this adapter
+            config: ngConfig,   // angular's $http configuration object
+            zConfig: config,    // the config arg from the calling Breeze data service adapter
+            success: successFn, // adapter's success callback
+            error: errorFn      // adapter's error callback            
+        }
+
+        if (core.isFunction(this.requestInterceptor)){
+            this.requestInterceptor(requestInfo);
+            if (this.requestInterceptor.oneTime){
+                this.requestInterceptor = null;
+            }
+        }
+
+        if (requestInfo.config){
+            httpService(requestInfo.config)
+            .success(requestInfo.success)
+            .error(requestInfo.error);
+            rootScope && rootScope.$digest();           
+        }
+
+        function successFn(data, status, headers, xconfig, statusText) {
             // HACK: because $http returns a server side null as a string containing "null" - this is WRONG. 
             if (data === "null") data = null;
             var httpResponse = {
+                config: config,
                 data: data,
-                status: status,
                 getHeaders: headers,
-                config: config
+                status: status,
+                statusText: statusText
             };
             config.success(httpResponse);
-        }).error( function (data, status, headers, xconfig) {
+        }
+
+        function errorFn(data, status, headers, xconfig, statusText) {
+            // Timeout appears as an error with status===0 and no data. 
+            // Make it better
+            if (status === 0 && data == null){
+                data = 'timeout';
+            }
             var httpResponse = {
+                config: config,
                 data: data,
-                status: status,
                 getHeaders: headers,
-                config: config
+                status: status,
+                statusText: statusText
             };
             config.error(httpResponse);
-        });
-        rootScope && rootScope.$digest();
+        }
     };
 
     function encodeParams(obj) {
         var query = '';
-        var  key, subValue, innerObj;
+        var key, subValue, innerObj, fullSubName;
 
         for (var name in obj) {
             var value = obj[name];
@@ -116,6 +150,8 @@
                     innerObj[fullSubName] = subValue;
                     query += encodeParams(innerObj) + '&';
                 }
+            } else if (value === null) {
+                query += encodeURIComponent(name) + '=&';
             } else if (value !== undefined) {
                 query += encodeURIComponent(name) + '=' + encodeURIComponent(value) + '&';
             }
@@ -123,7 +159,6 @@
 
         return query.length ? query.substr(0, query.length - 1) : query;
     }
-
     
     breeze.config.registerAdapter("ajax", ctor);
     

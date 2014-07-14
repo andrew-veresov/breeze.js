@@ -4,6 +4,13 @@
 
 var __hasOwnProperty = uncurry(Object.prototype.hasOwnProperty);
 var __arraySlice = uncurry(Array.prototype.slice);
+var __isES5Supported = function () {
+    try {
+        return !!Object.getPrototypeOf && Object.defineProperty({}, 'x', {});
+    } catch (e) {
+        return false;
+    }
+}();
 
 // iterate over object
 function __objectForEach(obj, kvFn) {
@@ -39,7 +46,23 @@ function __objectMapToArray(obj, kvFn) {
     return results;
 }
 
+function __isSettable(entity, propertyName) {
+    var pd = __getPropDescriptor(entity, propertyName);
+    if (pd == null) return true;
+    return !! (pd.writable || pd.set);
+}
 
+function __getPropDescriptor(obj, propertyName) {
+    if (!__isES5Supported) return null;
+
+    if (obj.hasOwnProperty(propertyName)) {
+        return Object.getOwnPropertyDescriptor(obj, propertyName);
+    } else {
+        var nextObj = Object.getPrototypeOf(obj);
+        if (nextObj == null) return null;
+        return __getPropDescriptor(nextObj, propertyName);
+    }
+} 
 
 // Functional extensions 
 
@@ -71,9 +94,9 @@ function __getOwnPropertyValues(source) {
 function __extend(target, source, propNames) {
     if (!source) return target;
     if (propNames) {
-        propNames.forEach(function (propName) {
+        propNames.forEach(function(propName) {
             target[propName] = source[propName];
-        })
+        });
     } else {
         for (var propName in source) {
             if (__hasOwnProperty(source, propName)) {
@@ -148,7 +171,7 @@ function __toJSONSafe(obj, replacer) {
     } else if (typeof (obj) === "function") {
         result = undefined;
     } else {
-        var result = {};
+        result = {};
         for (var prop in obj) {
             if (prop === "_$visited") continue;
             var val = obj[prop];
@@ -156,7 +179,7 @@ function __toJSONSafe(obj, replacer) {
                 val = replacer(prop, val);
                 if (val === undefined) continue;
             }
-            var val = __toJSONSafe(val);
+            val = __toJSONSafe(val);
             if (val === undefined) continue;
             result[prop] = val;
         }
@@ -202,7 +225,7 @@ function __map(items, fn) {
     if (items == null) return items;
     var result;
     if (Array.isArray(items)) {
-        result = []
+        result = [];
         items.map(function (v, ix) {
             result[ix] = fn(v, ix);
         });
@@ -229,6 +252,11 @@ function __arrayIndexOf(array, predicate) {
     return -1;
 }
 
+function __arrayAddItemUnique(array, item) {
+    var ix = array.indexOf(item);
+    if (ix === -1) array.push(item);
+}
+
 function __arrayRemoveItem(array, predicateOrItem, shouldRemoveMultiple) {
     var predicate = __isFunction(predicateOrItem) ? predicateOrItem : undefined;
     var lastIx = array.length-1;
@@ -238,7 +266,7 @@ function __arrayRemoveItem(array, predicateOrItem, shouldRemoveMultiple) {
             array.splice(i, 1);
             removed = true;
             if (!shouldRemoveMultiple) {
-                return removed;
+                return true;
             }
         }
     }
@@ -319,13 +347,13 @@ function __requireLib(libNames, errMessage) {
         if (lib) return lib;
     }
     if (errMessage) {
-        throw new Error("Unable to initialize " + libNames + ".  " + errMessage || "");
+        throw new Error("Unable to initialize " + libNames + ".  " + errMessage );
     }
 }
 
 // Returns the 'libName' module if loaded or else returns undefined
 function __requireLibCore(libName) {
-    var window = this.window;
+    var window = global.window;
     if (!window) return; // Must run in a browser. Todo: add commonjs support
 
     // get library from browser globals if we can
@@ -492,14 +520,16 @@ function __isNumeric(n) {
 // string functions
 
 function __stringStartsWith(str, prefix) {
-    // returns false for empty strings too
-    if ((!str) || !prefix) return false;
+    // returns true for empty string or null prefix
+    if ((!str)) return false;
+    if (prefix == "" || prefix == null) return true;
     return str.indexOf(prefix, 0) === 0;
 }
 
 function __stringEndsWith(str, suffix) {
-    // returns false for empty strings too
-    if ((!str) || !suffix) return false;
+    // returns true for empty string or null suffix
+    if ((!str)) return false;
+    if (suffix == "" || suffix == null) return true;
     return str.indexOf(suffix, str.length - suffix.length) !== -1;
 }
 
@@ -536,6 +566,10 @@ if (!Object.create) {
 
 var core = {};
 
+
+
+core.__isES5Supported = __isES5Supported;
+
 // core.getOwnPropertyValues = __getOwnPropertyValues;
 core.objectForEach= __objectForEach;
 // core.objectMapToArray= __objectMapToArray;
@@ -549,6 +583,7 @@ core.arrayEquals = __arrayEquals;
 // core.arrayDistinct = __arrayDistinct;
 core.arrayFirst = __arrayFirst;
 core.arrayIndexOf = __arrayIndexOf;
+// core.__arrayAddUnique = __arrayAddUnique;
 core.arrayRemoveItem = __arrayRemoveItem;
 core.arrayZip = __arrayZip;
 

@@ -312,7 +312,7 @@ var EntityManager = (function () {
     @method acceptChanges
     **/
     proto.acceptChanges = function () {
-        this.getChanges().forEach(function (entity) { entity.entityAspect.acceptChanges(); })
+        this.getChanges().forEach(function(entity) { entity.entityAspect.acceptChanges(); });
     }
 
     /**
@@ -781,7 +781,7 @@ var EntityManager = (function () {
             });
     @method executeQueryLocally
     @param query {EntityQuery}  The {{#crossLink "EntityQuery"}}{{/crossLink}} to execute.
-    @return  {Array of Entity}  Array of Entities
+    @return  {Array of Entity}  Array of entities from cache that satisfy the query
     **/
     proto.executeQueryLocally = function (query) {
         assertParam(query, "query").isInstanceOf(EntityQuery).check();
@@ -793,15 +793,10 @@ var EntityManager = (function () {
         // filter then order then skip then take
         var filterFunc = query._toFilterFunction(entityType);
 
-        if (filterFunc) {
-            var newFilterFunc = function(entity) {
-                return entity && (!entity.entityAspect.entityState.isDeleted()) && filterFunc(entity);
-            };
-        } else {
-            var newFilterFunc = function(entity) {
-                return entity && (!entity.entityAspect.entityState.isDeleted());
-            };
-        }
+        var newFilterFunc = function(entity) {
+            return entity && (!entity.entityAspect.entityState.isDeleted()) && (filterFunc ? filterFunc(entity) : true);
+        };
+
         var result = [];
         groups.forEach(function (group) {
             result.push.apply(result, group._entities.filter(newFilterFunc));
@@ -1039,19 +1034,18 @@ var EntityManager = (function () {
     function clearServerErrors(entities) {
         entities.forEach(function (entity) {
             var serverKeys = [];
-            var valErrors = entity.entityAspect._validationErrors;
-            __objectForEach(valErrors, function (key, ve) {
+            var aspect = entity.entityAspect;
+            __objectForEach(aspect._validationErrors, function (key, ve) {
                 if (ve.isServerError) serverKeys.push(key);
             });
             if (serverKeys.length === 0) return;
-            serverKeys.forEach(function(key) {
-                delete valErrors[key];
+            aspect._processValidationOpAndPublish(function () {
+                serverKeys.forEach(function (key) {
+                    aspect._removeValidationError(key);
+                });
             });
-            entity.hasValidationErrors = !__isEmpty(valErrors);
         });
-
     }
-
 
     function createEntityErrors(entities) {
         var entityErrors = [];
@@ -1145,22 +1139,17 @@ var EntityManager = (function () {
     **/
     proto.getEntityByKey = function () {
         var entityKey = createEntityKey(this, arguments).entityKey;
-        var group;
-        var subtypes = entityKey._subtypes;
-        if (subtypes) {
-            for (var i = 0, j = subtypes.length; i < j; i++) {
-                group = this._findEntityGroup(subtypes[i]);
-                // group version of findEntityByKey doesn't care about entityType
-                var ek = group && group.findEntityByKey(entityKey);
-                if (ek) return ek;
-            }
-        } else {
-            group = this._findEntityGroup(entityKey.entityType);
-            return group && group.findEntityByKey(entityKey);
-        }
+        var entityTypes = entityKey._subtypes || [entityKey.entityType];
+        var ek = null;
+        // hack use of some to simulate mapFirst logic.
+        entityTypes.some(function(et) {
+            var group = this._findEntityGroup(et);
+            // group version of findEntityByKey doesn't care about entityType
+            ek = group && group.findEntityByKey(entityKey);
+            return ek;
+        }, this);
+        return ek;
     };
-    
-
         
     /**
     Attempts to fetch an entity from the server by its key with
@@ -1456,10 +1445,8 @@ var EntityManager = (function () {
     proto.getEntities = function (entityTypes, entityStates) {
         entityTypes = checkEntityTypes(this, entityTypes);
         assertParam(entityStates, "entityStates").isOptional().isEnumOf(EntityState).or().isNonEmptyArray().isEnumOf(EntityState).check();
-            
-        if (entityStates) {
-            entityStates = validateEntityStates(this, entityStates);
-        }
+               
+        entityStates = entityStates && validateEntityStates(this, entityStates);
         return getEntitiesCore(this, entityTypes, entityStates);
     };
         
@@ -1480,11 +1467,12 @@ var EntityManager = (function () {
     };
 
     proto._notifyStateChange = function (entity, needsSave) {
-        this.entityChanged.publish({ entityAction: EntityAction.EntityStateChange, entity: entity });
-
+        var ecArgs = { entityAction: EntityAction.EntityStateChange, entity: entity };
+        
         if (needsSave) {
             if (!this._hasChanges) {
                 this._setHasChanges(true);
+                this.entityChanged.publish(ecArgs);
             }
         } else {
             // called when rejecting a change or merging an unchanged record.
@@ -1492,9 +1480,13 @@ var EntityManager = (function () {
             // so defer it during a query/import or save and call it once when complete ( if needed).
             if (this._hasChanges) {
                 if (this.isLoading) {
-                    this._hasChangesAction = this._hasChangesAction || function () { this._setHasChanges(null); }.bind(this);
+                    this._hasChangesAction = this._hasChangesAction || function() {
+                        this._setHasChanges(null);
+                        this.entityChanged.publish(ecArgs);
+                    }.bind(this);
                 } else {
                     this._setHasChanges(null);
+                    this.entityChanged.publish(ecArgs);
                 }
             }
         }
@@ -1522,7 +1514,7 @@ var EntityManager = (function () {
             // attach any unattachedChildren
             var tuples = unattachedMap.getTuples(entityKey);
             if (tuples) {
-                tuples.forEach(function (tpl) {
+                tuples.slice(0).forEach(function (tpl) {
 
                     var unattachedChildren = tpl.children.filter(function (e) {
                         return e.entityAspect.entityState !== EntityState.Detached;
@@ -1660,10 +1652,10 @@ var EntityManager = (function () {
             // eg may be undefined or null
             if (!eg) return;
             var entities = eg.getEntities(entityStates);
-            if (!selected) {
-                selected = entities;
-            } else {
+            if (selected) {
                 selected.push.apply(selected, entities);
+            } else {
+                selected = entities;
             }
         });
         return selected || [];
@@ -1741,7 +1733,6 @@ var EntityManager = (function () {
             if (value == null && dp.defaultValue == null) return;
 
             if (value && dp.isComplexProperty) {
-                var newValue;
                 var coDps = dp.dataType.dataProperties;
                 value = __map(value, function (v) {
                     return structuralObjectToJson(v, coDps, serializerFn);
@@ -1763,6 +1754,9 @@ var EntityManager = (function () {
                 tempNavPropNames: exportTempKeyInfo(aspect, tempKeys),
                 entityState: entityState.name
             };
+            if (aspect.extraMetadata) {
+                newAspect.extraMetadata = aspect.extraMetadata;
+            }
             if (entityState.isModified() || entityState.isDeleted()) {
                 newAspect.originalValuesMap = aspect.originalValues;
             }
@@ -1820,7 +1814,7 @@ var EntityManager = (function () {
             var entityState = EntityState.fromName(newAspect.entityState);
             var newTempKey;
             if (entityState.isAdded()) {
-                newTempKey = tempKeyMap[entityKey.toString()];
+                newTempKey = getMappedKey(tempKeyMap, entityKey);
                 // merge added records with non temp keys
                 targetEntity = (newTempKey === undefined) ? entityGroup.findEntityByKey(entityKey) : null;
             } else {
@@ -1845,7 +1839,8 @@ var EntityManager = (function () {
             } else {
                 targetEntity = entityType._createInstanceCore();
                 entityType._updateTargetFromRaw(targetEntity, rawEntity, rawValueFn);
-                if (newTempKey !== undefined) {
+                if (newTempKey != null) {
+                    targetEntity.entityAspect.hasTempKey = true;
                     // fixup pk
                     targetEntity.setProperty(entityType.keyProperties[0].name, newTempKey.values[0]);
 
@@ -1857,13 +1852,12 @@ var EntityManager = (function () {
                             var fkPropName = np.relatedDataProperties[0].name;
                             var oldFkValue = targetEntity.getProperty(fkPropName);
                             var fk = new EntityKey(np.entityType, [oldFkValue]);
-                            var newFk = tempKeyMap[fk.toString()];
+                            var newFk = getMappedKey(tempKeyMap, fk);
                             targetEntity.setProperty(fkPropName, newFk.values[0]);
                         });
                     }
                 }
                 // Now performed in attachEntity
-                // entityType._initializeInstance(targetEntity);
                 targetEntity = entityGroup.attachEntity(targetEntity, entityState);
                 entityChanged.publish({ entityAction: EntityAction.AttachOnImport, entity: targetEntity });
                 if (!entityState.isUnchanged()) {
@@ -1877,8 +1871,19 @@ var EntityManager = (function () {
         return entitiesToLink;
     }
 
-    function promiseWithCallbacks(promise, callback, errorCallback) {
+    function getMappedKey(tempKeyMap, entityKey) {
+        var newKey = tempKeyMap[entityKey.toString()];
+        if (newKey) return newKey;
+        var subtypes = entityKey._subtypes;
+        if (!subtypes) return null;
+        for (var i = 0, j = subtypes.length; i < j; i++) {
+            newKey = tempKeyMap[entityKey.toString(subtypes[i])];
+            if (newKey) return newKey;
+        }
+        return null;
+    }
 
+    function promiseWithCallbacks(promise, callback, errorCallback) {
         promise = promise.then(function (data) {
             if (callback) callback(data);
             return Q.resolve(data);
@@ -1929,7 +1934,6 @@ var EntityManager = (function () {
         } else {
             return __getOwnPropertyValues(groupMap);
         }
-
     }
 
     function checkEntityKey(em, entity) {
@@ -1955,11 +1959,11 @@ var EntityManager = (function () {
     function validateEntityStates(em, entityStates) {
         if (!entityStates) return null;
         entityStates = __toArray(entityStates);
-        entityStates.forEach(function (es) {
+        entityStates.forEach(function(es) {
             if (!EntityState.contains(es)) {
                 throw new Error("The EntityManager.getChanges() 'entityStates' parameter must either be null, an entityState or an array of entityStates");
             }
-        })
+        });
         return entityStates;
     }
 
@@ -1973,7 +1977,7 @@ var EntityManager = (function () {
     proto._updateFkVal = function (fkProp, oldValue, newValue) {
         var group = this._entityGroupMap[fkProp.parentType.name];
         if (!group) return;
-        group._updateFkVal(fkProp, oldValue, newValue)
+        group._updateFkVal(fkProp, oldValue, newValue);
     }
 
     function attachRelatedEntities(em, entity, entityState, mergeStrategy) {
@@ -1994,6 +1998,7 @@ var EntityManager = (function () {
     // returns a promise
     function executeQueryCore(em, query, queryOptions, dataService) {
         try {
+            var results;
             var metadataStore = em.metadataStore;
             
             if (metadataStore.isEmpty() && dataService.hasServerMetadata) {
@@ -2002,7 +2007,7 @@ var EntityManager = (function () {
             
             if (queryOptions.fetchStrategy === FetchStrategy.FromLocalCache) {
                 try {
-                    var results = em.executeQueryLocally(query);
+                    results = em.executeQueryLocally(query);
                     return Q.resolve({ results: results, query: query });
                 } catch(e) {
                     return Q.reject(e);
@@ -2047,7 +2052,7 @@ var EntityManager = (function () {
                     var nodes = dataService.jsonResultsAdapter.extractResults(data);
                     nodes = __toArray(nodes);
                     
-                    var results = mappingContext.visitAndMerge(nodes, { nodeType: "root" });
+                    results = mappingContext.visitAndMerge(nodes, { nodeType: "root" });
                     if (validateOnQuery) {
                         results.forEach(function (r) {
                             // anon types and simple types will not have an entityAspect.
@@ -2055,6 +2060,8 @@ var EntityManager = (function () {
                         });
                     }
                     mappingContext.processDeferred();
+                    // if query has expand clauses walk each of the 'results' and mark the expanded props as loaded.
+                    markLoadedNavProps(results, query);
                     return { results: results, query: query, entityManager: em, httpResponse: data.httpResponse, inlineCount: data.inlineCount };
                 });
                 return Q.resolve(result);
@@ -2072,6 +2079,32 @@ var EntityManager = (function () {
             }
             return Q.reject(e);
         }
+    }
+
+    function markLoadedNavProps(entities, query) {
+        if (query.noTrackingEnabled) return;
+        var expandClause = query.expandClause;
+        if (expandClause == null) return;
+        expandClause.propertyPaths.forEach(function(propertyPath) {
+            var propNames = propertyPath.split('.');
+            markLoadedNavPath(entities, propNames);
+        });
+    }
+
+    function markLoadedNavPath(entities, propNames) {
+        var propName = propNames[0];
+        entities.forEach(function (entity) {
+            var ea = entity.entityAspect;
+            if (!ea) return; // entity may not be a 'real' entity in the case of a projection.
+            ea._markAsLoaded(propName);           
+            if (propNames.length === 1) return;
+            var next = entity.getProperty(propName);
+            if (!next) return; // no children to process.
+            // strange logic because nonscalar nav values are NOT really arrays 
+            // otherwise we could use Array.isArray
+            if (!next.arrayChanged) next = [next];
+            markLoadedNavPath(next, propNames.slice(1)); 
+        });
     }
    
     function updateConcurrencyProperties(entities) {
@@ -2140,7 +2173,7 @@ var EntityManager = (function () {
     proto.helper = {
         unwrapInstance: unwrapInstance,
         unwrapOriginalValues: unwrapOriginalValues,
-        unwrapChangedValues: unwrapChangedValues,
+        unwrapChangedValues: unwrapChangedValues
     };
     
    
@@ -2205,37 +2238,55 @@ var EntityManager = (function () {
         return result;
     }
     
-    function unwrapChangedValues(target, metadataStore, transformFn) {
-        var stype = target.entityType || target.complexType;
+    function unwrapChangedValues(entity, metadataStore, transformFn) {
+        var stype = entity.entityType; 
         var serializerFn = getSerializerFn(stype);
-        var aspect = target.entityAspect || target.complexAspect;
         var fn = metadataStore.namingConvention.clientPropertyNameToServer;
         var result = {};
-        __objectForEach(aspect.originalValues, function (propName, value) {
+        __objectForEach(entity.entityAspect.originalValues, function (propName, value) {
             var prop = stype.getProperty(propName);
-            var val = target.getProperty(propName);
+            var val = entity.getProperty(propName);
             val = transformFn ? transformFn(prop, val) : val;
             if (val === undefined) return;
-            val = serializerFn ? serializerFn(dp, val) : val;
+            val = serializerFn ? serializerFn(prop, val) : val;
             if (val !== undefined) {
                 result[fn(propName, prop)] = val;
             }
         });
+        // any change to any complex object or array of complex objects returns the ENTIRE
+        // current complex object or complex object array.  This is by design. Complex Objects
+        // are atomic. 
         stype.complexProperties.forEach(function (cp) {
-            var nextTarget = target.getProperty(cp.name);
-            if (cp.isScalar) {
-                var unwrappedCo = unwrapChangedValues(nextTarget, metadataStore, transformFn);
-                if (!__isEmpty(unwrappedCo)) {
-                    result[fn(cp.name, cp)] = unwrappedCo;
-                }
-            } else {
-                var unwrappedCos = nextTarget.map(function (item) {
-                    return unwrapChangedValues(item, metadataStore, transformFn);
+            if (cpHasOriginalValues(entity, cp)) {
+                var coOrCos = entity.getProperty(cp.name);
+                result[fn(cp.name, cp)] = __map(coOrCos, function(co) {
+                    return unwrapInstance(co, transformFn);
                 });
-                result[fn(cp.name, cp)] = unwrappedCos;
-            }
+            } 
         });
         return result;
+    }
+
+    function cpHasOriginalValues(structuralObject, cp) {
+        var coOrCos = structuralObject.getProperty(cp.name);
+        if (cp.isScalar) {
+            return coHasOriginalValues(coOrCos);
+        } else {
+            // this occurs when a nonscalar co array has had cos added or removed.
+            if (coOrCos._origValues) return true;
+            return coOrCos.some(function (co) {
+                return coHasOriginalValues(co);
+            });
+        }
+    }
+
+    function coHasOriginalValues(co) {
+        // next line checks all non complex properties of the co.
+        if (!__isEmpty(co.complexAspect.originalValues)) return true;
+        // now need to recursively check each of the cps
+        return co.complexType.complexProperties.some(function(cp) {
+            return cpHasOriginalValues(co, cp);
+        });
     }
 
     function getSerializerFn(stype) {

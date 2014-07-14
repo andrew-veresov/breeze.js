@@ -1,5 +1,4 @@
-﻿"use strict";
-(function (factory) {
+﻿(function (factory) {
     if (breeze) {
         factory(breeze);
     } else if (typeof require === "function" && typeof exports === "object" && typeof module === "object") {
@@ -10,18 +9,20 @@
         define(["breeze"], factory);
     }
 }(function(breeze) {
-    
+    "use strict";  
     var core = breeze.core;
 
     var ctor = function() {
         this.name = "backingStore";
     };
+    // protoFn used instead of proto here to avoid naming collision with function params.
+    var protoFn = ctor.prototype;
     
-    ctor.prototype.initialize = function() {
+    protoFn.initialize = function() {
 
     };
 
-    ctor.prototype.getTrackablePropertyNames = function (entity) {
+    protoFn.getTrackablePropertyNames = function (entity) {
         var names = [];
         for (var p in entity) {
             if (p === "entityType") continue;
@@ -37,7 +38,7 @@
     };
 
     // This method is called during Metadata initialization 
-    ctor.prototype.initializeEntityPrototype = function (proto) {
+    protoFn.initializeEntityPrototype = function (proto) {
 
         proto.getProperty = function(propertyName) {
             return this[propertyName];
@@ -59,15 +60,17 @@
     // which can be called either directly or via standard query materialization
 
     // entity is either an entity or a complexObject
-    ctor.prototype.startTracking = function (entity, proto) {
+    protoFn.startTracking = function (entity, proto) {
         // can't touch the normal property sets within this method - access the backingStore directly instead. 
         var bs = movePropsToBackingStore(entity);
 
         // assign default values to the entity
         var stype = entity.entityType || entity.complexType;
-        stype.getProperties().forEach(function(prop) {
+        stype.getProperties().forEach(function (prop) {
+            
             var propName = prop.name;
             var val = entity[propName];
+            
             if (prop.isDataProperty) {
                 if (prop.isComplexProperty) {
                     if (prop.isScalar) {
@@ -98,7 +101,9 @@
             // otherwise we could just do 
             // entity[propName] = val 
             // after all of the interception logic had been injected.
-            bs[propName] = val;
+            if (prop.isSettable || prop.isNavigationProperty) {
+                bs[propName] = val;
+            }
         });
     };
 
@@ -119,10 +124,15 @@
                 
             // If property is already defined on the prototype then wrap it in another propertyDescriptor.
             // otherwise create a propDescriptor for it. 
+            var descr;
             if (propName in proto) {
-               wrapPropDescription(proto, prop);
+               descr = wrapPropDescription(proto, prop);
             } else {
-               makePropDescription(proto, prop);
+               descr = makePropDescription(proto, prop);
+            }
+            // descr will be null for a wrapped descr that is not configurable
+            if (descr != null) {
+                Object.defineProperty(proto, propName, descr);
             }
             alreadyWrapped[propName] = true;
         });
@@ -170,7 +180,8 @@
             enumerable: true,
             configurable: true
         };
-        Object.defineProperty(proto, propName, descr);
+        return descr;
+        
     }
 
     function getAccessorFn(bs, propName) {
@@ -205,8 +216,7 @@
     function wrapPropDescription(proto, property) {
         if (!proto.hasOwnProperty(property.name)) {
             var nextProto = Object.getPrototypeOf(proto);
-            wrapPropDescription(nextProto, property);
-            return;
+            return wrapPropDescription(nextProto, property);
         } 
 
         var propDescr = Object.getOwnPropertyDescriptor(proto, property.name);
@@ -237,7 +247,7 @@
             enumerable: propDescr.enumerable,
             configurable: true
         };
-        Object.defineProperty(proto, property.name, newDescr);
+        return newDescr;
     };
 
    
@@ -262,7 +272,7 @@
             return pending.entity === instance;
         });
         if (pending) return pending.backingStore;
-        bs = {};
+        var bs = {};
         pendingStores.push({ entity: instance, backingStore: bs });
         return bs;
     }

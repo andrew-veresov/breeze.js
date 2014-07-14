@@ -1,4 +1,5 @@
-﻿// needs JQuery
+﻿// jQuery ajax adapter ( JQuery v.>=1.5 )
+// see https://api.jquery.com/jQuery.ajax/
 (function(factory) {
     // Module systems magic dance.
     if (breeze) {
@@ -11,6 +12,7 @@
         define(["breeze"], factory);
     }
 }(function(breeze) {
+    "use strict";
     var core = breeze.core;
     
     var jQuery;
@@ -18,15 +20,16 @@
     var ctor = function () {
         this.name = "jQuery";
         this.defaultSettings = { };
+        this.requestInterceptor = null;
     };
+    var proto = ctor.prototype;
 
-    ctor.prototype.initialize = function () {
-        // jQuery = core.requireLib("jQuery", "needed for 'ajax_jQuery' pluggin", true);
-        // for the time being don't fail if not found
+    proto.initialize = function () {
+        // look for the jQuery lib but don't fail immediately if not found
         jQuery = core.requireLib("jQuery");
     };
 
-    ctor.prototype.ajax = function (config) {
+    proto.ajax = function (config) {
         if (!jQuery) {
             throw new Error("Unable to locate jQuery");
         }
@@ -47,61 +50,84 @@
             jqConfig.headers = core.extend(this.defaultSettings.headers, jqConfig.headers);
         }
         
-        jqConfig.success = function (data, textStatus, XHR) {
-            var httpResponse;
-            var xRespondedJson = XHR.getResponseHeader("X-Responded-JSON");
-            if (xRespondedJson != undefined) {
-                var xRespondedObj = JSON.parse(xRespondedJson);
-                httpResponse = {
-                data: data,
-                    status: xRespondedObj.status != undefined ? xRespondedObj.status : XHR.status,
-                    getHeaders: getMergedHeadersFn(XHR, xRespondedObj.headers),
-                    error: data.Message,
-                    config: config
-                };
-            } else {
-                httpResponse = {
-                    data: data,
-                status: XHR.status,
-                getHeaders: getHeadersFn(XHR),
-                config: config
-            };
+        var requestInfo = {
+            adapter: this,      // this adapter
+            config: jqConfig,   // jQuery's ajax 'settings' object
+            zConfig: config,    // the config arg from the calling Breeze data service adapter
+            success: successFn, // adapter's success callback
+            error: errorFn      // adapter's error callback
+        }
+
+        if (core.isFunction(this.requestInterceptor)){
+            this.requestInterceptor(requestInfo);
+            if (this.requestInterceptor.oneTime){
+                this.requestInterceptor = null;
             }
-            
+        }
+
+        if (requestInfo.config){
+            requestInfo.jqXHR = jQuery.ajax(requestInfo.config)
+            .done(requestInfo.success)
+            .fail(requestInfo.error); 
+        }
+
+        function successFn(data, statusText, jqXHR) {
+		var httpResponse;
+		var xRespondedJson = jqXHR.getResponseHeader("X-Responded-JSON");
+		if (xRespondedJson != undefined) {
+			var xRespondedObj = JSON.parse(xRespondedJson);
+			httpResponse = {
+	                    data: data,
+	                    status: xRespondedObj.status != undefined ? xRespondedObj.status : jqXHR.status,
+	                    getHeaders: getMergedHeadersFn(XHR, xRespondedObj.headers),
+	                    error: data.Message,
+	                    config: config
+	                };
+		} else {
+			var httpResponse = {
+		                config: config,
+		                data: data,
+		                getHeaders: getHeadersFn(jqXHR),
+		                status: jqXHR.status,
+		                statusText: statusText
+		            };
+		}
             if (httpResponse.status >= 300) {
                 config.error(httpResponse);
             } else {
-            config.success(httpResponse);
+                config.success(httpResponse);
             }
-        
-            XHR.onreadystatechange = null;
-            XHR.abort = null;
-        };
-        jqConfig.error = function (XHR, textStatus, errorThrown) {
+            jqXHR.onreadystatechange = null;
+            jqXHR.abort = null;               
+        }
+
+        function errorFn(jqXHR, statusText, errorThrown) {
             var httpResponse = {
-                data: XHR.responseText,
-                status: XHR.status,
-                getHeaders: getHeadersFn(XHR),
+                config: config,
+                data: jqXHR.responseText,
                 error: errorThrown,
-                config: config
+                getHeaders: getHeadersFn(jqXHR),
+                status: jqXHR.status,
+                statusText: statusText
             };
             config.error(httpResponse);
-            XHR.onreadystatechange = null;
-            XHR.abort = null;
-        };
-        jQuery.ajax(jqConfig);
-
+            jqXHR.onreadystatechange = null;
+            jqXHR.abort = null;               
+        }
     };
-
     
-    function getHeadersFn(XHR) {
-        return function (headerName) {
-            if (headerName && headerName.length > 0) {
-                return XHR.getResponseHeader(headerName);
-            } else {
-                return XHR.getAllResponseHeaders();
+    function getHeadersFn(jqXHR) {
+        if (jqXHR.status === 0) { // timeout or abort; no headers
+            return function (headerName) {
+                return (headerName && headerName.length > 0) ? "" : {};
             };
-        };
+        } else { // jqXHR should have header functions          
+            return function (headerName) {
+                return (headerName && headerName.length > 0) ?
+                    jqXHR.getResponseHeader(headerName) :
+                    jqXHR.getAllResponseHeaders();
+            };
+        } 
     }
     
 	//Returns headers from XHR object as well as headers from additional container
@@ -122,6 +148,7 @@
             };
         };
     }
+
     breeze.config.registerAdapter("ajax", ctor);
     
 }));

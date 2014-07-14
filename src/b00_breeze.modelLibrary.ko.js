@@ -1,5 +1,4 @@
-﻿"use strict";
-(function (factory) {
+﻿(function (factory) {
     if (breeze) {
         factory(breeze);
     } else if (typeof require === "function" && typeof exports === "object" && typeof module === "object") {
@@ -10,15 +9,17 @@
         define(["breeze"], factory);
     }
 }(function(breeze) {
-    
+    "use strict";  
     var core = breeze.core;
     var ko;
 
     var ctor = function () {
         this.name = "ko";
     };
+    // protoFn used instead of proto here to avoid naming collision with function params.
+    var protoFn = ctor.prototype;
 
-    ctor.prototype.initialize = function () {
+    protoFn.initialize = function () {
         ko = core.requireLib("ko", "The Knockout library");
         ko.extenders.intercept = function(target, interceptorOptions) {
             var instance = interceptorOptions.instance;
@@ -45,15 +46,15 @@
 
     };
 
-    ctor.prototype.getTrackablePropertyNames = function (entity) {
+    protoFn.getTrackablePropertyNames = function (entity) {
         var names = [];
         for (var p in entity) {
             if (p === "entityType") continue;
             if (p === "_$typeName") continue;
             
             var propDescr = getES5PropDescriptor(entity, p);
-            if (propDescr && propDescr.get) {          
-                names.push(p)
+            if (propDescr && propDescr.get) {
+                names.push(p);
             } else {
                 var val = entity[p];
                 if (ko.isObservable(val)) {
@@ -66,7 +67,7 @@
         return names;
     };
 
-    ctor.prototype.initializeEntityPrototype = function (proto) {
+    protoFn.initializeEntityPrototype = function (proto) {
 
         proto.getProperty = function(propertyName) {
             return this[propertyName]();
@@ -95,9 +96,9 @@
     function isolateES5Props(proto) {
         
         var stype = proto.entityType || proto.complexType;
-        es5Descriptors = {};
+        var es5Descriptors = {};
         stype.getProperties().forEach(function (prop) {
-            propDescr = getES5PropDescriptor(proto, prop.name);
+            var propDescr = getES5PropDescriptor(proto, prop.name);
             if (propDescr) {
                 es5Descriptors[prop.name] = propDescr;
             }
@@ -123,7 +124,7 @@
         }
     }
 
-    ctor.prototype.startTracking = function (entity, proto) {
+    protoFn.startTracking = function (entity, proto) {
         // create ko's for each property and assign defaultValues
 
         var stype = entity.entityType || entity.complexType;
@@ -178,7 +179,7 @@
                 koObj = val;
             // otherwise
             } else {
-                var val = initializeValueForProp(entity, prop, val);
+                val = initializeValueForProp(entity, prop, val);
                 koObj = prop.isScalar ? ko.observable(val) : ko.observableArray(val);
             }
 
