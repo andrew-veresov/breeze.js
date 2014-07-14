@@ -898,6 +898,9 @@ var CsdlMetadataParser = (function () {
             }
         }
         if (dp) {
+			if (csdlProperty.displayName != undefined) {
+				dp.displayName = csdlProperty.displayName;
+			}
             parentType.addProperty(dp);
             addValidators(dp);
         }
@@ -2387,7 +2390,7 @@ var DataProperty = (function () {
             return rawEntity[dp.nameOnServer || dp.name];
         } else {
             var val = rawEntity[dp.nameOnServer];
-            return val !== undefined ? val : dp.defaultValue;
+            return val !== undefined || rawEntity.$isPartial ? val : dp.defaultValue;
         }
     }
 

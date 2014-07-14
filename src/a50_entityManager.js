@@ -915,7 +915,7 @@ var EntityManager = (function () {
             
         if (!saveOptions.allowConcurrentSaves) {
             var anyPendingSaves = entitiesToSave.some(function (entity) {
-                return entity.entityAspect.isBeingSaved;
+                return entity.entityAspect.isBeingSaved();
             });                
             if (anyPendingSaves) {
                 var err = new Error("Concurrent saves not allowed - SaveOptions.allowConcurrentSaves is false");
@@ -1013,6 +1013,29 @@ var EntityManager = (function () {
         }
     };
 
+    proto.updateFrom = function (saveResult) {
+        saveResult = {
+            entities: saveResult.entities || saveResult.Entities,
+            keyMappings: saveResult.keyMappings || saveResult.KeyMappings || []
+        }
+
+        fixupKeys(this, saveResult.keyMappings);
+
+        var mappingContext = new MappingContext({
+            query: null, // tells visitAndMerge that this is a save instead of a query
+            entityManager: this,
+            mergeOptions: { mergeStrategy: MergeStrategy.OverwriteChanges },
+            dataService: DataService.resolve([this.dataService])
+        });
+
+        // Note that the visitAndMerge operation has been optimized so that we do not actually perform a merge if the 
+        // the save operation did not actually return the entity - i.e. during OData and Mongo updates and deletes.
+        var savedEntities = mappingContext.visitAndMerge(saveResult.entities, { nodeType: "root" });
+        // update _hasChanges after save.
+        this.hasChangesChanged.publish({ entityManager: this, hasChanges: false });
+        saveResult.entities = savedEntities;
+        return Q.resolve(saveResult.entities);
+    }
     function clearServerErrors(entities) {
         entities.forEach(function (entity) {
             var serverKeys = [];
@@ -1660,7 +1683,7 @@ var EntityManager = (function () {
         
     function markIsBeingSaved(entities, flag) {
         entities.forEach(function(entity) {
-            entity.entityAspect.isBeingSaved = flag;
+            entity.entityAspect.isBeingSaved(flag);
         });
     }
 
@@ -1992,7 +2015,8 @@ var EntityManager = (function () {
                     dataService: dataService,
                     mergeOptions: {
                         mergeStrategy: queryOptions.mergeStrategy,
-                        noTracking: !!query.noTrackingEnabled
+                        noTracking: !!query.noTrackingEnabled,
+			asTypeName: query.asTypeName
                     }
             });
             
@@ -2052,7 +2076,7 @@ var EntityManager = (function () {
    
     function updateConcurrencyProperties(entities) {
         var candidates = entities.filter(function (e) {
-            e.entityAspect.isBeingSaved = true;
+            e.entityAspect.isBeingSaved(true);
             return e.entityAspect.entityState.isModified()
                 && e.entityType.concurrencyProperties.length > 0;
 
